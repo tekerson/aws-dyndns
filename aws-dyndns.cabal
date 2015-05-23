@@ -1,0 +1,17 @@
+name:                aws-dyndns
+version:             0.1.0.0
+synopsis:            Dynamically update an AWS Route53 DNS entry
+description:         Dynamically update an AWS Route53 DNS entry
+license:             BSD3
+license-file:        LICENSE
+author:              Brenton Alker
+maintainer:          brenton@tekerson.com
+category:            Network
+build-type:          Simple
+cabal-version:       >=1.10
+
+executable aws-dyndns
+  main-is:             Main.hs
+  build-depends:       base >=4.7 && <4.8
+  hs-source-dirs:      src
+  default-language:    Haskell2010
