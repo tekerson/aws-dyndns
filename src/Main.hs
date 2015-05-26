@@ -2,6 +2,16 @@
 
 module Main where
 
+import Data.IP (IPv4)
+import Network.DNS.Lookup (lookupA)
+import Network.DNS.Resolver
+  ( FileOrNumericHost (RCHostName)
+  , defaultResolvConf
+  , makeResolvSeed
+  , resolvInfo
+  , withResolver
+  )
+
 import Control.Monad.IO.Class
   ( MonadIO
   , liftIO
@@ -44,7 +54,6 @@ import Aws.Route53
   )
 
 import Network.HTTP.Conduit (withManager)
-import Network.HTTP (simpleHTTP, getRequest, getResponseBody)
 
 import Control.Applicative ((<$>), (<*>))
 import Control.Monad (void)
@@ -70,7 +79,12 @@ parseArgs argv = case argv of
                       _ -> fail usage
 
 ipAddress :: IO Text
-ipAddress = pack <$> (simpleHTTP (getRequest "http://ipecho.net/plain") >>= getResponseBody)
+ipAddress = do
+  rs' <- makeResolvSeed defaultResolvConf
+  Right (resolverIP:_) <- withResolver rs' $ \resolver -> lookupA resolver "resolver1.opendns.com"
+  rs <- makeResolvSeed $ defaultResolvConf { resolvInfo = RCHostName $ show resolverIP }
+  Right (result:_) <- withResolver rs $ \resolver -> lookupA resolver "myip.opendns.com"
+  return . pack . show $ result
 
 usage :: String
 usage = "Usage: Zone Domain Ip"

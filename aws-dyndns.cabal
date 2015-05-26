@@ -19,7 +19,8 @@ executable aws-dyndns
   build-depends:       base >=4.7 && <4.8
     , aws
     , aws-route53
-    , HTTP
+    , dns
+    , iproute
     , http-conduit
     , text
     , transformers
