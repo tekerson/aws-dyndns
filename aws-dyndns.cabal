@@ -20,6 +20,9 @@ executable aws-dyndns
     , aws
     , aws-route53
     , dns
+    , mtl
+    , safe
+    , bytestring
     , iproute
     , http-conduit
     , text

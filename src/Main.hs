@@ -1,21 +1,46 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase #-}
+{-# LANGUAGE OverloadedStrings, FlexibleContexts, GeneralizedNewtypeDeriving #-}
 
 module Main where
 
+import Safe (headMay)
+
+import qualified Data.ByteString as BS
+
 import Data.IP (IPv4)
+import Network.DNS.Types (DNSError)
 import Network.DNS.Lookup (lookupA)
 import Network.DNS.Resolver
   ( FileOrNumericHost (RCHostName)
+  , ResolvConf (ResolvConf)
   , defaultResolvConf
   , makeResolvSeed
   , resolvInfo
   , withResolver
   )
 
+import Control.Monad.Except
+  ( ExceptT (ExceptT)
+  , Except
+  , MonadError
+  , runExceptT
+  , runExcept
+  , throwError
+  , catchError
+  )
+
 import Control.Monad.IO.Class
   ( MonadIO
   , liftIO
   )
+
+import Network.HTTP.Conduit (withManager)
+
+import Control.Applicative (Applicative, pure, (<$>), (<*>))
+import Control.Monad (void)
+import Data.Foldable (find)
+import Data.Text (Text, pack, unpack)
+
+import System.Environment (getArgs)
 
 import Aws
   ( Response
@@ -53,74 +78,141 @@ import Aws.Route53
   , rrsWeight
   )
 
-import Network.HTTP.Conduit (withManager)
-
-import Control.Applicative ((<$>), (<*>))
-import Control.Monad (void)
-import Data.Foldable (find)
-import Data.Text (Text, pack, unpack)
-
-import System.Environment (getArgs)
-
 main :: IO ()
-main = do
-    (zone, domain) <- parseArgs =<< getArgs
-    ip <- ipAddress
-    putStrLn $ "Updating to: " ++ unpack ip ++ "..."
+main = void . runApp $ app
+  `catchError` (\e -> liftIO $ print e)
+
+app :: App ()
+app = do
+    ip <- inApp detectIP
+    (zone, domain) <- inApp =<< parseArgs <$> liftIO getArgs
+    liftIO . putStrLn $ "Updating to: " ++ unpack ip ++ "..."
     let zone' = Domain zone
         domain' = Domain domain
         ip' = ResourceRecord ip
-    void $ updateDns zone' domain' ip'
-    putStrLn "Done"
-
-parseArgs :: (Monad m) => [String] -> m (Text, Text)
-parseArgs argv = case argv of
-                      [zone, domain] -> return (pack zone, pack domain)
-                      _ -> fail usage
-
-ipAddress :: IO Text
-ipAddress = do
-  rs' <- makeResolvSeed defaultResolvConf
-  Right (resolverIP:_) <- withResolver rs' $ \resolver -> lookupA resolver "resolver1.opendns.com"
-  rs <- makeResolvSeed $ defaultResolvConf { resolvInfo = RCHostName $ show resolverIP }
-  Right (result:_) <- withResolver rs $ \resolver -> lookupA resolver "myip.opendns.com"
-  return . pack . show $ result
+    inApp $ updateDns zone' domain' ip'
+    liftIO $ putStrLn "Done"
 
 usage :: String
 usage = "Usage: Zone Domain Ip"
 
-convert :: (Text, Text) -> (Domain, Domain)
-convert (zone, domain) = (Domain zone, Domain domain)
+-- APP --
+
+newtype App a = App { unApp :: ExceptT AppError IO a }
+  deriving ( Functor, Applicative, Monad
+           , MonadError AppError, MonadIO)
+
+runApp :: App a -> IO (Either AppError a)
+runApp = runExceptT . unApp
+
+data AppError
+  = AppArgumentError ArgParserError
+  | AppGetIPError IPDetectorError
+  | AppAwsError APIError
+  deriving (Show)
+
+class InApp m where
+  inApp :: m a -> App a
+
+instance InApp ArgParser where
+  inApp a = either (throwError . AppArgumentError) pure $ runArgParser a
+
+instance InApp IPDetector where
+  inApp a = App . ExceptT $ either (throwError . AppGetIPError) pure <$> runIPDetector a
+
+instance InApp APIUpdater where
+  inApp a = App . ExceptT $ either (throwError . AppAwsError) pure <$> runAPIUpdater a
+
+-- ArgParser --
+
+newtype ArgParser a = ArgParser { unArgParser :: Except ArgParserError a }
+  deriving ( Functor, Applicative, Monad
+           , MonadError ArgParserError)
+
+data ArgParserError = ArgParserError
+  deriving (Show)
+
+runArgParser :: ArgParser a -> Either ArgParserError a
+runArgParser = runExcept . unArgParser
+
+parseArgs :: [String] -> ArgParser (Text, Text)
+parseArgs argv = case argv of
+                      [zone, domain] -> return (pack zone, pack domain)
+                      _ -> throwError ArgParserError
+
+-- IPDetector --
+
+newtype IPDetector a = IPDetector { unIPDetector :: ExceptT IPDetectorError IO a }
+  deriving ( Functor, Applicative, Monad
+           , MonadError IPDetectorError, MonadIO)
+
+runIPDetector :: IPDetector a -> IO (Either IPDetectorError a)
+runIPDetector = runExceptT . unIPDetector
+
+data IPDetectorError = IPDetectorError
+                     | GetIPError DNSError
+                     deriving (Show)
+
+detectIP :: IPDetector Text
+detectIP = do
+  resolverIPs <- dnsLookup "resolver1.opendns.com" defaultResolvConf
+  resolverIP <- maybe (throwError IPDetectorError) (return . show) (headMay resolverIPs)
+  ips <- dnsLookup "myip.opendns.com"
+                   defaultResolvConf { resolvInfo = RCHostName resolverIP }
+  maybe (throwError IPDetectorError) (return . pack . show) (headMay ips)
+
+dnsLookup :: (MonadIO m, MonadError IPDetectorError m)
+          => BS.ByteString -> ResolvConf -> m [IPv4]
+dnsLookup host resolv = do
+  resp <- liftIO $ do
+    rs' <- makeResolvSeed resolv
+    withResolver rs' $ \resolver -> lookupA resolver host
+  either (throwError . GetIPError) return resp
+
+-- APIUpdater --
+
+newtype APIUpdater a = APIUpdater { unAPIUpdater :: ExceptT APIError IO a }
+  deriving ( Functor, Applicative, Monad
+           , MonadError APIError, MonadIO)
+
+runAPIUpdater :: APIUpdater a -> IO (Either APIError a)
+runAPIUpdater = runExceptT . unAPIUpdater
+
+data APIError = FindZoneError
+              | UpdateError
+              deriving (Show)
 
 updateDns :: Domain -> Domain -> ResourceRecord
-          -> IO (Response Route53Metadata ChangeResourceRecordSetsResponse)
+          -> APIUpdater (Response Route53Metadata ChangeResourceRecordSetsResponse)
 updateDns tZone domain ip = do
   zone <- findZoneId tZone =<< getHostedZones
-  liftIO $ updateRecordSet
+  updateRecordSet
     (hzId zone)
     domain
     ip
 
-findZoneId :: MonadIO m => Domain -> HostedZones -> m HostedZone
+findZoneId :: MonadIO m
+           => Domain -> HostedZones -> m HostedZone
 findZoneId domain zones =
   case find (\zone -> hzName zone == domain) zones of
        Nothing -> fail "Not Found"
        Just zone -> return zone
 
-getHostedZones :: IO HostedZones
-getHostedZones = do
+getHostedZones :: MonadIO m
+               => m HostedZones
+getHostedZones = liftIO $ do
   cfg <- Aws.baseConfiguration
   resp <- withManager $ \mgr ->
     Aws.aws cfg route53 mgr listHostedZones
   ListHostedZonesResponse { lhzrHostedZones = zones } <- readResponse resp
   return zones
 
-updateRecordSet ::
-  HostedZoneId -> Domain -> ResourceRecord
-  -> IO (Response
-          (ResponseMetadata ChangeResourceRecordSetsResponse)
-          ChangeResourceRecordSetsResponse)
-updateRecordSet zoneId domain ip = do
+updateRecordSet :: (MonadIO m, MonadError APIError m)
+                => HostedZoneId -> Domain -> ResourceRecord
+                -> m (Response
+                        (ResponseMetadata ChangeResourceRecordSetsResponse)
+                        ChangeResourceRecordSetsResponse)
+updateRecordSet zoneId domain ip = liftIO $ do
   let
     comment = Just "Set by: aws-dyndns"
     record = ResourceRecordSet
