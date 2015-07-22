@@ -23,7 +23,8 @@ data ArgParserError = ArgParserError
 runArgParser :: ArgParser a -> Either ArgParserError a
 runArgParser = runExcept . unArgParser
 
-parseArgs :: [String] -> ArgParser (Text, Text)
+parseArgs :: [String] -> ArgParser (Text, Text, Maybe Text)
 parseArgs argv = case argv of
-                      [zone, domain] -> return (pack zone, pack domain)
+                      [zone, domain, ip] -> return (pack zone, pack domain, Just (pack ip))
+                      [zone, domain] -> return (pack zone, pack domain, Nothing)
                       _ -> throwError ArgParserError

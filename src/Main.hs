@@ -44,8 +44,8 @@ conf = AppConf
 
 app :: App ()
 app = do
-    ip <- inApp detectIP
-    (zone, domain) <- inApp =<< parseArgs <$> liftIO getArgs
+    (zone, domain, argIp) <- inApp =<< parseArgs <$> liftIO getArgs
+    ip <- maybe (inApp detectIP) pure argIp
     liftIO . putStrLn $ "Updating to: " ++ unpack ip ++ "..."
     let zone' = Domain zone
         domain' = Domain domain
