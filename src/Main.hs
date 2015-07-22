@@ -200,11 +200,11 @@ updateDns tZone domain ip = do
     domain
     ip
 
-findZoneId :: MonadIO m
+findZoneId :: (MonadIO m, MonadError APIError m)
            => Domain -> HostedZones -> m HostedZone
 findZoneId domain zones =
   case find (\zone -> hzName zone == domain) zones of
-       Nothing -> fail "Not Found"
+       Nothing -> throwError FindZoneError
        Just zone -> return zone
 
 getHostedZones :: MonadIO m
