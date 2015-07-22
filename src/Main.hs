@@ -18,6 +18,8 @@ import Network.DNS.Resolver
   , withResolver
   )
 
+import Control.Monad.Trans.Reader
+
 import Control.Monad.Except
   ( ExceptT (ExceptT)
   , Except
@@ -79,8 +81,11 @@ import Aws.Route53
   )
 
 main :: IO ()
-main = void . runApp $ app
+main = void . runApp conf $ app
   `catchError` (\e -> liftIO $ print e)
+
+conf :: AppConf
+conf = AppConf
 
 app :: App ()
 app = do
@@ -98,13 +103,14 @@ usage = "Usage: Zone Domain Ip"
 
 -- APP --
 
-newtype App a = App { unApp :: ExceptT AppError IO a }
+newtype App a = App { unApp :: ExceptT AppError (ReaderT AppConf IO) a }
   deriving ( Functor, Applicative, Monad
            , MonadError AppError, MonadIO)
 
-runApp :: App a -> IO (Either AppError a)
-runApp = runExceptT . unApp
+runApp :: AppConf -> App a -> IO (Either AppError a)
+runApp c = flip runReaderT c . runExceptT . unApp
 
+data AppConf = AppConf
 data AppError
   = AppArgumentError ArgParserError
   | AppGetIPError IPDetectorError
@@ -118,10 +124,13 @@ instance InApp ArgParser where
   inApp a = either (throwError . AppArgumentError) pure $ runArgParser a
 
 instance InApp IPDetector where
-  inApp a = App . ExceptT $ either (throwError . AppGetIPError) pure <$> runIPDetector a
+  inApp a = do
+    App . ExceptT $ either (throwError . AppGetIPError) pure
+      <$> ReaderT (const (pure =<< (liftIO $ runIPDetector a)))
 
 instance InApp APIUpdater where
-  inApp a = App . ExceptT $ either (throwError . AppAwsError) pure <$> runAPIUpdater a
+  inApp a = App . ExceptT $ either (throwError . AppAwsError) pure
+    <$> ReaderT (const (pure =<< liftIO $ runAPIUpdater a))
 
 -- ArgParser --
 
